@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -18,38 +20,43 @@ const (
 	authToken = "your-secret-here"
 )
 
-type ClashLog struct {
-	Type    string `json:"type"`
-	Payload string `json:"payload"`
-	Time    string `json:"time,omitempty"`
-}
-
-type Model struct {
-	logs    []ClashLog
-	err     error
-	client  *http.Client
-	done    chan struct{}
-	program *tea.Program
-}
-
-type LogMsg struct {
-	logs []ClashLog
-}
-
-// 定义样式
 var (
-	// 标题样式
-	titleStyle = lipgloss.NewStyle().
+	// 主容器样式
+	mainStyle = lipgloss.NewStyle().
+			Padding(1).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#7571F9"))
+
+	// 标题容器样式
+	headerStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#7571F9")).
-			MarginBottom(1)
+			Padding(0, 1).
+			MarginBottom(1).
+			Border(lipgloss.Border{
+			Top:         "─",
+			Bottom:      "─",
+			Left:        "│",
+			Right:       "│",
+			TopLeft:     "╭",
+			TopRight:    "╮",
+			BottomLeft:  "╰",
+			BottomRight: "╯",
+		})
+
+	// 日志容器样式
+	logContainerStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#6272A4")).
+				Padding(0, 1).
+				MarginTop(1)
 
 	// 日志类型样式
 	typeStyles = map[string]lipgloss.Style{
-		"debug":   lipgloss.NewStyle().Foreground(lipgloss.Color("#A9A9A9")), // 灰色
-		"info":    lipgloss.NewStyle().Foreground(lipgloss.Color("#7571F9")), // 蓝色
-		"warning": lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C")), // 橙色
-		"error":   lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")), // 红色
+		"debug":   lipgloss.NewStyle().Foreground(lipgloss.Color("#A9A9A9")),
+		"info":    lipgloss.NewStyle().Foreground(lipgloss.Color("#7571F9")),
+		"warning": lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C")),
+		"error":   lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")),
 	}
 
 	// 时间样式
@@ -64,13 +71,41 @@ var (
 	// 底部提示样式
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6272A4")).
-			MarginTop(1)
+			MarginTop(1).
+			Align(lipgloss.Center)
+
+	// 过滤器样式
+	filterStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFB86C")).
+			MarginBottom(1)
 )
+
+type ClashLog struct {
+	Type    string `json:"type"`
+	Payload string `json:"payload"`
+	Time    string `json:"time,omitempty"`
+}
+
+type Model struct {
+	logs     []ClashLog
+	err      error
+	client   *http.Client
+	done     chan struct{}
+	program  *tea.Program
+	viewport viewport.Model
+	filters  []string
+	ready    bool
+}
+
+type LogMsg struct {
+	logs []ClashLog
+}
 
 func initialModel() *Model {
 	return &Model{
-		logs: make([]ClashLog, 0, 100),
-		done: make(chan struct{}),
+		logs:    make([]ClashLog, 0, 100),
+		done:    make(chan struct{}),
+		filters: []string{},
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
@@ -112,17 +147,14 @@ func (m *Model) fetchLogsRoutine() {
 			batchTimer := time.NewTimer(batchTimeout)
 
 			for {
-				// 使用 select 来处理超时
 				select {
 				case <-batchTimer.C:
-					// 超时，发送当前批次
 					if len(batch) > 0 {
 						m.program.Send(LogMsg{logs: batch})
 						batch = nil
 					}
 					batchTimer.Reset(batchTimeout)
 				default:
-					// 尝试读取一条日志
 					var log ClashLog
 					if err := decoder.Decode(&log); err != nil {
 						resp.Body.Close()
@@ -141,7 +173,6 @@ func (m *Model) fetchLogsRoutine() {
 				}
 			}
 		NEXT_REQUEST:
-			// 发送剩余的日志
 			if len(batch) > 0 {
 				m.program.Send(LogMsg{logs: batch})
 				batch = nil
@@ -155,16 +186,40 @@ func (m *Model) fetchLogsRoutine() {
 }
 
 func (m Model) Init() tea.Cmd {
-	// 不需要特殊的初始命令
 	return nil
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var (
+		cmd  tea.Cmd
+		cmds []tea.Cmd
+	)
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "q" {
+		switch msg.String() {
+		case "q":
 			close(m.done)
 			return m, tea.Quit
+		case "d":
+			m.toggleFilter("debug")
+		case "i":
+			m.toggleFilter("info")
+		case "w":
+			m.toggleFilter("warning")
+		case "e":
+			m.toggleFilter("error")
+		case "a":
+			m.filters = []string{}
+		}
+	case tea.WindowSizeMsg:
+		if !m.ready {
+			m.viewport = viewport.New(msg.Width-4, msg.Height-10)
+			m.viewport.Style = logContainerStyle
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width - 4
+			m.viewport.Height = msg.Height - 10
 		}
 	case LogMsg:
 		m.logs = append(m.logs, msg.logs...)
@@ -172,29 +227,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logs = m.logs[len(m.logs)-100:]
 		}
 	}
-	return m, nil
-}
 
-func (m Model) View() string {
-	if m.err != nil {
-		return lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF5555")).
-			Render(fmt.Sprintf("Error: %v\n", m.err))
+	if m.ready {
+		m.viewport.SetContent(m.renderLogs())
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
-	// 标题
-	s := titleStyle.Render(fmt.Sprintf("🔍 Clash Logs Monitor (%d logs)", len(m.logs)))
-	s += "\n"
+	return m, tea.Batch(cmds...)
+}
 
-	// 日志内容
+func (m *Model) toggleFilter(logType string) {
+	for i, f := range m.filters {
+		if f == logType {
+			m.filters = append(m.filters[:i], m.filters[i+1:]...)
+			return
+		}
+	}
+	m.filters = append(m.filters, logType)
+}
+
+func (m Model) renderLogs() string {
+	var logLines []string
 	for _, log := range m.logs {
-		// 获取日志类型的样式，如果没有特定样式就使用默认样式
+		if !m.isLogVisible(log) {
+			continue
+		}
+
 		typeStyle, ok := typeStyles[log.Type]
 		if !ok {
 			typeStyle = payloadStyle
 		}
 
-		// 格式化单条日志
 		logLine := lipgloss.JoinHorizontal(
 			lipgloss.Left,
 			timeStyle.Render(fmt.Sprintf("[%s]", log.Time)),
@@ -203,10 +267,52 @@ func (m Model) View() string {
 			" ",
 			payloadStyle.Render(log.Payload),
 		)
-		s += logLine + "\n"
+		logLines = append(logLines, logLine)
 	}
-	s += "\nPress q to quit\n"
-	return s
+	return lipgloss.JoinVertical(lipgloss.Left, logLines...)
+}
+
+func (m Model) View() string {
+	if !m.ready {
+		return "Initializing..."
+	}
+
+	if m.err != nil {
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FF5555")).
+			Render(fmt.Sprintf("Error: %v\n", m.err))
+	}
+
+	header := headerStyle.Render(fmt.Sprintf("🔍 Clash Logs Monitor (%d logs)", len(m.logs)))
+	filterStatus := filterStyle.Render(fmt.Sprintf("Filters: %s", m.getFilterStatus()))
+	footer := footerStyle.Render("q: quit • d: debug • i: info • w: warning • e: error • a: all")
+
+	return mainStyle.Render(lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		filterStatus,
+		m.viewport.View(),
+		footer,
+	))
+}
+
+func (m Model) getFilterStatus() string {
+	if len(m.filters) == 0 {
+		return "all"
+	}
+	return strings.Join(m.filters, ", ")
+}
+
+func (m Model) isLogVisible(log ClashLog) bool {
+	if len(m.filters) == 0 {
+		return true
+	}
+	for _, filter := range m.filters {
+		if strings.EqualFold(log.Type, filter) {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
