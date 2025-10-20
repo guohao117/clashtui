@@ -31,7 +31,9 @@ func main() {
 		return
 	}
 
-	req.Header.Add("Authorization", "Bearer "+authToken)
+	if authToken != "" {
+		req.Header.Add("Authorization", "Bearer "+authToken)
+	}
 
 	fmt.Println("Sending request...")
 	resp, err := client.Do(req)

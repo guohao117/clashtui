@@ -1,4 +1,4 @@
-module github.com/guohao117/ctui
+module github.com/guohao117/clashtui
 
 go 1.23.2
 
