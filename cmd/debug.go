@@ -1,69 +1,58 @@
-//go:build debug
+//go:build ignore
 
+// Debug is a standalone tool for testing Clash log streaming.
+// Run with: go run cmd/debug.go
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
-)
+	"os"
+	"os/signal"
+	"syscall"
 
-const (
-	clashHost = "http://127.0.0.1:9090"
-	authToken = "your-secret-here" // 替换为你的 token
+	"github.com/guohao117/clashtui/internal/api"
+	"github.com/guohao117/clashtui/internal/config"
 )
-
-type ClashLog struct {
-	Type    string `json:"type"`
-	Payload string `json:"payload"`
-	Time    string `json:"time"`
-}
 
 func main() {
-	fmt.Println("Starting debug...")
+	fmt.Println("Starting debug log reader...")
 
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", clashHost+"/logs", nil)
-	if err != nil {
-		fmt.Printf("Error creating request: %v\n", err)
-		return
+	cfg := config.LoadFromEnv()
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
 	}
 
-	if authToken != "" {
-		req.Header.Add("Authorization", "Bearer "+authToken)
-	}
+	client := api.NewClient(cfg)
 
-	fmt.Println("Sending request...")
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("Error making request: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	fmt.Printf("Response status: %s\n", resp.Status)
-	fmt.Println("Reading logs...")
+	// Graceful shutdown on SIGINT/SIGTERM.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		fmt.Println("\nShutting down...")
+		cancel()
+	}()
 
-	decoder := json.NewDecoder(resp.Body)
+	ch := make(chan []api.ClashLog, 16)
+	go func() {
+		if err := client.StreamLogs(ctx, ch); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "stream error: %v\n", err)
+		}
+		close(ch)
+	}()
+
 	count := 0
-	for {
-		var log ClashLog
-		err := decoder.Decode(&log)
-		if err == io.EOF {
-			break
+	for batch := range ch {
+		for _, log := range batch {
+			count++
+			fmt.Printf("[%d] %-7s %s  %s\n", count, log.Type, log.Time, log.Payload)
 		}
-		if err != nil {
-			fmt.Printf("Error decoding log: %v\n", err)
-			return
-		}
-		count++
-		fmt.Printf("Log %d: %+v\n", count, log)
-
-		// 每读取一条日志暂停一下，方便观察
-		time.Sleep(time.Millisecond * 500)
 	}
 
-	fmt.Printf("Total logs read: %d\n", count)
+	fmt.Printf("Total logs: %d\n", count)
 }
